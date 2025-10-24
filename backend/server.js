@@ -124,25 +124,42 @@ app.post('/api/login', (req, res) => {
 });
 
 app.post('/api/forgot-password', (req, res) => {
-    const { email } = req.body;
+    const { email } = req.body; 
 
-    const sql = 'SELECT * FROM users WHERE email = ?';
-    db.query(sql, [email], (err, results) => {
-        if (err) return res.status(500).json({ msg: 'Server error' });
+    // Cari pengguna berdasarkan email
+    const sql = 'SELECT id, email FROM users WHERE email = ?';
+    db.query(sql, [email], (err, results) => { 
+        if (err) {
+            console.error('Database error in forgot-password:', err);
+            return res.status(500).json({ msg: 'Server error' });
+        }
+
         if (results.length === 0) {
-            return res.status(404).json({ msg: 'User with that email does not exist.' });
+            return res.json({ msg: 'A password reset link has been sent to your email address (if it exists).' });
         }
 
         const user = results[0];
+        
+        // Buat dan Simpan Token
         const token = crypto.randomBytes(20).toString('hex');
         const expires = new Date();
-        expires.setHours(expires.getHours() + 1);
+        expires.setHours(expires.getHours() + 1); // Token kedaluwarsa dalam 1 jam
 
         const updateSql = 'UPDATE users SET reset_password_token = ?, reset_password_expires = ? WHERE id = ?';
         db.query(updateSql, [token, expires, user.id], (err, updateResult) => {
-            if (err) return res.status(500).json({ msg: 'Error saving reset token.' });
+            if (err) {
+                console.error('Error saving reset token:', err);
+                return res.status(500).json({ msg: 'Error saving reset token.' });
+            }
             
-            res.json({ msg: 'Password reset token generated.', token: token });
+            // SIMULASI PENGIRIMAN EMAIL (Log ke console server)
+            const resetLink = `http://localhost:3000/reset-password?email=${user.email}&token=${token}`;
+            console.log(`\n======================================================`);
+            console.log(`[PASSWORD RESET SUCCESS] Token for user ${user.email}: ${token}`);
+            console.log(`[PASSWORD RESET SUCCESS] Full link (SIMULATION): ${resetLink}`);
+            console.log(`======================================================\n`);
+            
+            res.json({ msg: 'A password reset link has been sent to your email address.' });
         });
     });
 });
@@ -197,6 +214,39 @@ app.post('/api/admin/reset-password/:id', auth, async (req, res) => {
         res.status(500).json({ msg: 'Server error' });
     }
 });
+
+// @route   PUT api/admin/user/:id/role
+// @desc    Admin update user role
+// @access  Private (Admin only)
+app.put('/api/admin/user/:id/role', auth, (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ msg: 'Access denied' });
+    }
+
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!role || (role !== 'user' && role !== 'admin')) {
+        return res.status(400).json({ msg: 'Invalid role provided. Must be "user" or "admin".' });
+    }
+
+    if (String(req.user.id) === id) {
+        return res.status(403).json({ msg: 'You cannot change your own role via this endpoint.' });
+    }
+
+    const sql = 'UPDATE users SET role = ? WHERE id = ?';
+    db.query(sql, [role, id], (err, result) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).json({ msg: 'Server error: Failed to update user role.' });
+        }
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ msg: 'User not found.' });
+        }
+        res.json({ msg: `User role updated to ${role} successfully.` });
+    });
+});
+
 
 app.get('/api/user-dashboard', auth, (req, res) => {
     const { id } = req.user;
@@ -264,9 +314,9 @@ app.get('/api/admin-dashboard', auth, (req, res) => {
     const offset = (page - 1) * limit;
 
     const queries = [
-        'SELECT COUNT(id) AS total_users FROM users WHERE role = "user"',
+        'SELECT COUNT(id) AS total_users FROM users',
         'SELECT SUM(CASE WHEN type="deposit" THEN amount ELSE -amount END) AS total_savings FROM transactions',
-        'SELECT COUNT(id) AS new_users FROM users WHERE role = "user" AND DATE(created_at) = CURDATE()',
+        'SELECT COUNT(id) AS new_users FROM users WHERE DATE(created_at) = CURDATE()',
         `SELECT COUNT(*) AS total_count FROM transactions t JOIN users u ON t.user_id = u.id WHERE u.name LIKE ? OR u.email LIKE ? OR t.description LIKE ? OR t.category LIKE ?`,
         `SELECT u.name, u.email, t.type, t.amount, t.description, t.category, t.created_at FROM users u JOIN transactions t ON u.id = t.user_id WHERE u.name LIKE ? OR u.email LIKE ? OR t.description LIKE ? OR t.category LIKE ? ORDER BY t.created_at DESC LIMIT ? OFFSET ?`
     ];
@@ -292,6 +342,110 @@ app.get('/api/admin-dashboard', auth, (req, res) => {
     });
 });
 
+// @route   DELETE api/admin/user/:id
+// @desc    Admin delete user (with related data cleanup)
+// @access  Private (Admin only)
+app.delete('/api/admin/user/:id', auth, (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ msg: 'Access denied' });
+    }
+
+    const { id: userIdToDelete } = req.params;
+    const currentUserId = req.user.id;
+    
+    // Mencegah admin menghapus dirinya sendiri
+    if (String(userIdToDelete) === String(currentUserId)) {
+        return res.status(403).json({ msg: 'You cannot delete your own admin account via this endpoint.' });
+    }
+
+    db.beginTransaction(err => {
+        if (err) {
+            console.error('Transaction Start Error:', err);
+            return res.status(500).json({ msg: 'Server error' });
+        }
+        
+        // 1. Hapus entri dari wallet_members
+        const deleteWalletMembersSql = 'DELETE FROM wallet_members WHERE user_id = ?';
+        db.query(deleteWalletMembersSql, [userIdToDelete], (err) => {
+            if (err) {
+                return db.rollback(() => res.status(500).json({ msg: 'Error deleting wallet memberships.' }));
+            }
+            
+            // 2. Hapus transaksi pengguna
+            const deleteTransactionsSql = 'DELETE FROM transactions WHERE user_id = ?';
+            db.query(deleteTransactionsSql, [userIdToDelete], (err) => {
+                if (err) {
+                    return db.rollback(() => res.status(500).json({ msg: 'Error deleting user transactions.' }));
+                }
+
+                // 3. Hapus goals pengguna
+                const deleteGoalsSql = 'DELETE FROM goals WHERE user_id = ?';
+                db.query(deleteGoalsSql, [userIdToDelete], (err) => {
+                    if (err) {
+                        return db.rollback(() => res.status(500).json({ msg: 'Error deleting user goals.' }));
+                    }
+
+                    // 4. Hapus dompet yang dimiliki pengguna (Wallet harus kosong, tetapi tidak ada pemeriksaan saldo di sini)
+                    // Hati-hati: Asumsi dompet bersama yang dimiliki pengguna akan hilang.
+                    const deleteOwnedWalletsSql = 'DELETE FROM wallets WHERE owner_id = ?';
+                    db.query(deleteOwnedWalletsSql, [userIdToDelete], (err) => {
+                        if (err) {
+                            return db.rollback(() => res.status(500).json({ msg: 'Error deleting owned wallets.' }));
+                        }
+
+                        // 5. Ambil path foto profil untuk dihapus dari disk
+                        const getPhotoSql = 'SELECT profile_photo_url FROM users WHERE id = ?';
+                        db.query(getPhotoSql, [userIdToDelete], (err, photoResult) => {
+                            if (err) {
+                                return db.rollback(() => res.status(500).json({ msg: 'Error fetching profile photo path.' }));
+                            }
+
+                            const photoUrl = photoResult[0]?.profile_photo_url;
+                            
+                            // 6. Hapus pengguna itu sendiri
+                            const deleteUserSql = 'DELETE FROM users WHERE id = ?';
+                            db.query(deleteUserSql, [userIdToDelete], (err, userResult) => {
+                                if (err) {
+                                    return db.rollback(() => res.status(500).json({ msg: 'Error deleting user.' }));
+                                }
+                                if (userResult.affectedRows === 0) {
+                                    return db.rollback(() => res.status(404).json({ msg: 'User not found.' }));
+                                }
+                                
+                                // Hapus file foto dari disk jika ada
+                                if (photoUrl) {
+                                    const filename = path.basename(photoUrl);
+                                    const filePath = path.join(__dirname, 'uploads', filename);
+                                    fs.unlink(filePath, (unlinkErr) => {
+                                        if (unlinkErr) {
+                                            console.warn(`Could not delete profile photo file: ${filePath}. Proceeding with DB commit.`);
+                                        }
+                                        // Commit setelah mencoba menghapus file
+                                        db.commit(commitErr => {
+                                            if (commitErr) {
+                                                return db.rollback(() => res.status(500).json({ msg: 'Server error: commit failed.' }));
+                                            }
+                                            res.json({ msg: 'User and all related data deleted successfully.' });
+                                        });
+                                    });
+                                } else {
+                                    // Commit jika tidak ada foto
+                                    db.commit(commitErr => {
+                                        if (commitErr) {
+                                            return db.rollback(() => res.status(500).json({ msg: 'Server error: commit failed.' }));
+                                        }
+                                        res.json({ msg: 'User and all related data deleted successfully.' });
+                                    });
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    });
+});
+
 app.get('/api/admin-users', auth, (req, res) => {
     if (req.user.role !== 'admin') {
         return res.status(403).json({ msg: 'Access denied' });
@@ -301,18 +455,21 @@ app.get('/api/admin-users', auth, (req, res) => {
     const offset = (page - 1) * limit;
     const likeSearch = `%${search}%`;
 
-    let countSql = 'SELECT COUNT(*) as count FROM users WHERE role = "user"';
-    let dataSql = 'SELECT id, name, email, role, created_at, (SELECT SUM(CASE WHEN type="deposit" THEN amount ELSE -amount END) FROM transactions WHERE user_id = u.id) AS total_savings FROM users u WHERE role = "user"';
+    let countSql = 'SELECT COUNT(*) as count FROM users';
+    let dataSql = 'SELECT id, name, email, role, created_at, (SELECT SUM(CASE WHEN type="deposit" THEN amount ELSE -amount END) FROM transactions WHERE user_id = u.id) AS total_savings FROM users u';
+    
+    const countParams = [];
+    const dataParams = [];
 
     if (search) {
-        countSql += ` AND (name LIKE ? OR email LIKE ?)`;
-        dataSql += ` AND (u.name LIKE ? OR u.email LIKE ?)`;
+        countSql += ` WHERE name LIKE ? OR email LIKE ?`;
+        dataSql += ` WHERE u.name LIKE ? OR u.email LIKE ?`;
+        countParams.push(likeSearch, likeSearch);
+        dataParams.push(likeSearch, likeSearch);
     }
 
     dataSql += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-    
-    const countParams = search ? [likeSearch, likeSearch] : [];
-    const dataParams = search ? [likeSearch, likeSearch, parseInt(limit), parseInt(offset)] : [parseInt(limit), parseInt(offset)];
+    dataParams.push(parseInt(limit), parseInt(offset));
 
     db.query(countSql, countParams, (err, countResult) => {
         if (err) return res.status(500).json({ msg: 'Server error' });
@@ -449,28 +606,90 @@ app.delete('/api/profile/photo', auth, (req, res) => {
     });
 });
 
+// @route   PUT api/profile
+// @desc    Update user profile (e.g., name)
+// @access  Private
+app.put('/api/profile', auth, async (req, res) => {
+    const { id: userId } = req.user;
+    const { name } = req.body; 
+
+    if (!name || typeof name !== 'string' || name.trim().length < 3) {
+        return res.status(400).json({ msg: 'Name is required and must be at least 3 characters.' });
+    }
+
+    try {
+        const updateSql = 'UPDATE users SET name = ? WHERE id = ?';
+
+        db.query(updateSql, [name, userId], (err, result) => {
+            if (err) {
+                console.error('MySQL Update Error:', err);
+                return res.status(500).json({ msg: 'Server error: Failed to update name.' });
+            }
+            
+            const fetchSql = 'SELECT name, email, created_at, profile_photo_url FROM users WHERE id = ?';
+            db.query(fetchSql, [userId], (err, fetchResult) => {
+                if (err) {
+                    console.error('MySQL Fetch Error:', err);
+                    return res.status(500).json({ msg: 'Server error: Failed to fetch updated profile.' });
+                }
+                
+                if (fetchResult.length === 0) {
+                     return res.status(404).json({ msg: 'User not found after update.' });
+                }
+
+                res.json(fetchResult[0]);
+            });
+        });
+
+    } catch (err) {
+        console.error('Server Error:', err.message);
+        res.status(500).json({ msg: 'Server error' });
+    }
+});
+
+
+// =======================================================
+// MODIFIKASI INI: Endpoint Settings (HANYA Dark Mode)
+// =======================================================
+
 app.get('/api/settings', auth, (req, res) => {
     const { id } = req.user;
-    const sql = 'SELECT two_factor_auth, notifications, dark_mode FROM users WHERE id = ?';
+    // HANYA SELECT kolom yang pasti ada di database Anda
+    const sql = 'SELECT dark_mode FROM users WHERE id = ?'; 
     db.query(sql, [id], (err, result) => {
-        if (err) return res.status(500).json({ msg: 'Server error' });
+        if (err) {
+            // Log error SQL di konsol server
+            console.error("SQL Error fetching settings:", err); 
+            return res.status(500).json({ msg: 'Server error' });
+        }
         if (result.length === 0) return res.status(404).json({ msg: 'User not found' });
-        res.json(result[0]);
+        res.json(result[0]); 
     });
 });
 
 app.post('/api/update-setting', auth, (req, res) => {
     const { id } = req.user;
     const { settingName, value } = req.body;
-    if (!['two_factor_auth', 'notifications', 'dark_mode'].includes(settingName)) {
+    
+    // HANYA izinkan settingName yang pasti ada di DB
+    if (!['dark_mode'].includes(settingName)) {
         return res.status(400).json({ msg: 'Invalid setting name' });
     }
+    
     const sql = `UPDATE users SET ?? = ? WHERE id = ?`;
     db.query(sql, [settingName, value, id], (err, result) => {
-        if (err) return res.status(500).json({ msg: 'Server error' });
+        if (err) {
+            console.error("SQL Error updating setting:", err);
+            return res.status(500).json({ msg: 'Server error' });
+        }
         res.json({ msg: 'Setting updated successfully' });
     });
 });
+
+// =======================================================
+// AKHIR MODIFIKASI
+// =======================================================
+
 
 app.post('/api/change-password', auth, async (req, res) => {
     const { id } = req.user;

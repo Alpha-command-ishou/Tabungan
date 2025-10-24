@@ -16,7 +16,7 @@ const Sidebar = ({ role, isOpen, toggleSidebar }) => {
     <div className={`bg-white p-3 shadow-sm sidebar ${isOpen ? 'open' : 'closed'}`}>
       <div className="d-flex align-items-center mb-4">
         <FaPiggyBank size={30} className="text-primary me-2" />
-        <h5 className="mb-0 text-primary">SecureSave</h5>
+        <h5 className="mb-0 text-primary">Smart Savings</h5>
       </div>
       <Nav className="flex-column">
         {role === 'admin' ? (

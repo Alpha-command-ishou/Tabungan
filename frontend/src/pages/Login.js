@@ -38,7 +38,7 @@ const Login = () => {
       <Card style={{ width: '25rem' }} className="p-4 shadow-lg">
         <div className="text-center mb-4">
           <FaPiggyBank size={50} className="text-primary mb-2" />
-          <h2>SecureSave</h2>
+          <h2>Smart Savings</h2>
         </div>
         <h4 className="text-center mb-4">Log In</h4>
         {error && <Alert variant="danger">{error}</Alert>}
